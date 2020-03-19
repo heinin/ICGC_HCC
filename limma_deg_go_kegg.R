@@ -1,0 +1,958 @@
+# TODO: edit to match the style guidelines
+
+# ==============================================================================
+# Author(s) : Heini M Natri, hnatri@asu.edu
+# Date : July 2019
+# Description: Analyzing and visualizing the ICGC HCC Japanese data
+# ==============================================================================
+
+# ======================================
+# Load libraries
+# ======================================
+
+library(RColorBrewer)
+library(matrixStats)
+library(ggplot2)
+library(edgeR)
+library(DESeq)
+library(limma)
+library(doParallel)
+library(variancePartition)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(GOSemSim)
+library(biomaRt)
+library(UpSetR)
+library(VennDiagram)
+library(ggrepel)
+library(dplyr)
+library(stringr)
+library(forcats)
+
+# ======================================
+# Environment parameters
+# ======================================
+
+# Working directory
+setwd("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/")
+
+# Defining colors
+viralPalette <- brewer.pal(8, "Set1")
+hbvColor <- viralPalette[1]
+hcvColor <- viralPalette[2]
+bothColor <- viralPalette[3]
+neitherColor <- viralPalette[4]
+
+sexTissuePalette <- brewer.pal(12, "Paired")
+maleTumorColor <- sexTissuePalette[4]
+maleAdjacentColor <- sexTissuePalette[3]
+femaleTumorColor <- sexTissuePalette[6]
+femaleAdjacentColor <- sexTissuePalette[5]
+
+# ======================================
+# Read in data
+# ======================================
+
+metadata <- read.table("metadata_for_de.tsv", header=TRUE, sep="\t")
+tumorAdjacentExp <- read.table("japan_all_samples_salmon_expression_counts.txt", row.names = "id", header=TRUE)
+colnames(tumorAdjacentExp) <- gsub("\\.", "-", colnames(tumorAdjacentExp))
+
+# Importing gene annotations
+genes <- read.table("/Users/hnatri/Dropbox (ASU)/GTF_etc/gencode.v25.chr_patch_hapl_scaff.annotation.bed", header=FALSE, sep="\t")
+genes <- data.frame(genes)
+colnames(genes) <- c("chr", "start", "end", "id", "name", "strand")
+tumorAdjacentExp <- tumorAdjacentExp[rownames(tumorAdjacentExp) %in% genes$id ,]
+genes <- genes[match(rownames(tumorAdjacentExp), genes$id),]
+# Calculating gene length, this is needed for calculating the FPKM values
+genes$length <- with(genes, end - start)
+
+# Removing RK023 due to low quality
+metadata <- metadata[!(metadata$ID == "RK023") , ]
+
+# Subsetting and ordering metadata to match the count matrix
+tumorAdjacentExpSubset <- tumorAdjacentExp[,colnames(tumorAdjacentExp) %in% metadata$sampleid]
+metadataSubset <- metadata[metadata$sampleid %in% colnames(tumorAdjacentExpSubset),]
+metadataSubset <- metadataSubset[match(colnames(tumorAdjacentExpSubset), metadataSubset$sampleid),]
+rownames(metadataSubset) <- metadataSubset$sampleid
+
+# Adding tissue type, converting categorical variables to factors
+metadataSubset$tumor <- as.numeric(grepl('tumor', metadataSubset$sampleid, ignore.case=T))
+metadataSubset$gender_tissue <- paste(metadataSubset$Gender, metadataSubset$tumor, sep="_")
+metadataSubset$Virus_infection <- gsub("HBV,_HCV", "both", metadataSubset$Virus_infection)
+metadataSubset$gender_tissue_viral <- paste(metadataSubset$gender_tissue, metadataSubset$Virus_infection, sep="_")
+metadataSubset$tumor <- factor(metadataSubset$tumor)
+metadataSubset$Ta <- factor(metadataSubset$Ta)
+metadataSubset$Portal_vein_invasion <- factor(metadataSubset$Portal_vein_invasion)
+metadataSubset$Hepatic_vein_invasion <- factor(metadataSubset$Hepatic_vein_invasion)
+metadataSubset$Bile_duct_invasion <- factor(metadataSubset$Bile_duct_invasion)
+metadataSubset$Liver_fibrosisc <- factor(metadataSubset$Liver_fibrosisc)
+metadataSubset$Prognosis <- factor(metadataSubset$Prognosis)
+
+# Creating the DGEList object
+dge <- DGEList(counts=tumorAdjacentExpSubset, genes=genes)
+colnames(dge) <- colnames(tumorAdjacentExpSubset)
+dge$samples$sex <- metadataSubset$Gender
+dge$samples$viral <- factor(metadataSubset$Virus_infection)
+dge$samples$ID <- metadataSubset$ID
+dge$samples$tumor <- metadataSubset$tumor
+dge$samples$gender_tissue <- metadataSubset$gender_tissue
+dge$samples$gender_tissue_viral <- metadataSubset$gender_tissue_viral
+
+# Inspecting the N of samples in each group
+table(dge$samples$gender_tissue_viral)
+
+# ======================================
+# Filtering expression data
+# ======================================
+
+# Keeping genes that have a mean FPKM of at least 0.5 in at least one of the
+# groups under investigation and at least 6 reads in at least 10 samples
+fpkm <- rpkm(dge, gene.length=dge$genes$length)
+
+M_1_HBV_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="M_1_HBV")],1,mean,na.rm=TRUE)
+M_0_HBV_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="M_0_HBV")],1,mean,na.rm=TRUE)
+M_1_HCV_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="M_1_HCV")],1,mean,na.rm=TRUE)
+M_0_HCV_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="M_0_HCV")],1,mean,na.rm=TRUE)
+M_1_HBVHCV_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="M_1_both")],1,mean,na.rm=TRUE)
+M_0_HBVHCV_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="M_0_both")],1,mean,na.rm=TRUE)
+M_1_NBNC_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="M_1_NBNC")],1,mean,na.rm=TRUE)
+M_0_NBNC_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="M_0_NBNC")],1,mean,na.rm=TRUE)
+
+F_1_HBV_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="F_1_HBV")],1,mean,na.rm=TRUE)
+F_0_HBV_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="F_0_HBV")],1,mean,na.rm=TRUE)
+F_1_HCV_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="F_1_HCV")],1,mean,na.rm=TRUE)
+F_0_HCV_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="F_0_HCV")],1,mean,na.rm=TRUE)
+F_1_NBNC_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="F_1_NBNC")],1,mean,na.rm=TRUE)
+F_0_NBNC_mean_fpkm <- apply(as.data.frame(fpkm)[(dge$samples$gender_tissue_viral=="F_0_NBNC")],1,mean,na.rm=TRUE)
+
+keep <- (M_1_HBV_mean_fpkm > 0.5 | M_0_HBV_mean_fpkm > 0.5 | 
+         M_1_HCV_mean_fpkm > 0.5 | M_0_HCV_mean_fpkm > 0.5 |
+         M_1_HBVHCV_mean_fpkm > 0.5 | M_0_HBVHCV_mean_fpkm > 0.5 |
+         M_1_NBNC_mean_fpkm > 0.5 | M_0_NBNC_mean_fpkm > 0.5 |
+         F_1_HBV_mean_fpkm > 0.5 | F_0_HBV_mean_fpkm > 0.5 |
+         F_1_HCV_mean_fpkm > 0.5 | F_0_HCV_mean_fpkm > 0.5 |
+         F_1_NBNC_mean_fpkm > 0.5 | F_0_NBNC_mean_fpkm > 0.5)
+
+dge <- dge[keep,,keep.lib.sizes=FALSE]
+dge <- calcNormFactors(dge, method="TMM")
+keep <- rowSums(dge$counts > 6) >= 10
+dge <- dge[keep,,keep.lib.size=FALSE]
+dge <- calcNormFactors(dge, method="TMM")
+
+# N of genes retained after filtering
+dim(dge$genes)
+
+# ======================================
+# voom transformation
+# ======================================
+
+# Creating a design model matrix with the variable of interest
+design <- model.matrix(~0+dge$samples$gender_tissue_viral)
+colnames(design) <- gsub("dge\\$samples\\$gender_tissue_viral", "", colnames(design))
+head(design)
+
+# Running voom with quality weights. Normalizes expression intensities so that
+# the log-ratios have similar distributions across a set of samples.
+# To quantile normalize, add normalize.method="quantile"
+v <- voomWithQualityWeights(dge, design, plot=TRUE)
+
+# ======================================
+# Multi-dimensional scaling plot
+# ======================================
+
+# MDS plot. The dimensions are in the mds object.
+mds <- plotMDS(v, top = 100, ndim = 10, dim.plot = c(1,2), plot=TRUE, cex=2,
+               pch=ifelse(v$targets$viral %in% c("HBV"), 17,
+                          ifelse(v$targets$viral %in% c("HCV"), 15,
+                                 ifelse(v$targets$viral %in% c("both"), 16,  3))),
+               col=ifelse(v$targets$gender_tissue=="M_1", maleTumorColor,
+                          ifelse(v$targets$gender_tissue=="M_0", maleAdjacentColor,
+                                 ifelse(v$targets$gender_tissue=="F_1", femaleTumorColor,
+                                        ifelse(v$targets$gender_tissue=="F_0", femaleAdjacentColor, "azure3")))),
+               gene.selection = "common") #, gene.selection = "pairwise", labels=tissue,
+
+# Adding legends
+legend("topleft", pch=c(15), 
+      col=c(maleTumorColor, maleAdjacentColor, femaleTumorColor, femaleAdjacentColor),
+      legend=c("Male tumor", "Male adjacent", "Female tumor", "Female adjacent"))
+legend("topright", pch=c(17, 15, 16, 3),
+      col=c("black"),
+      legend=c("HBV", "HCV", "Both", "Neither"))
+
+# Saving dimension 1 to use as a covariate
+v$targets$md1 <- mds$cmdscale.out[,1]
+
+# ======================================
+# PCA
+# ======================================
+
+# Select most variable genes based on coefficient of variance (mean scaled)
+# Voom transformed counts
+voomCounts <- v$E
+voomCountsMatrix <- data.matrix(voomCounts, rownames.force = NA)
+ntop = length(dge$genes$id)
+
+means <- rowMeans(voomCountsMatrix)
+Pvars <- rowVars(voomCountsMatrix)
+cv2 <- Pvars/means^2
+select <- order(cv2, decreasing = TRUE)[seq_len(min(ntop, length(cv2)))]
+head(select)
+highly_variable_exp <- ((voomCountsMatrix)[select, ])
+dim(highly_variable_exp)
+
+# Running PCA
+pca_exp <- prcomp(t(highly_variable_exp), scale=T, center=T)
+head(pca_exp$x)
+
+# Dataframe with the first 10 PCs
+dim1_10 <- data.frame(pca_exp$x[,1:10])
+# Adding metadata
+pcaWithMetadata <- merge(dim1_10, metadataSubset, by=0, all=TRUE)
+pcaWithMetadata$Virus_infection <- factor(pcaWithMetadata$Virus_infection,
+                                          levels=c("HBV", "HCV", "both", "NBNC", NA))
+pcaWithMetadata$gender_tissue <- factor(pcaWithMetadata$gender_tissue,
+                                        levels=c("M_1", "M_0", "F_1", "F_0"))
+
+# Plotting
+ggplot(data=pcaWithMetadata, aes(x = PC1, y = PC2, shape = Virus_infection,
+                                 color = gender_tissue)) +
+  geom_point(size = 8) +
+  theme_bw() +
+  scale_color_manual(values=c(maleTumorColor, maleAdjacentColor,
+                              femaleTumorColor, femaleAdjacentColor,
+                              "azure3")) +
+  theme(plot.title = element_text(size = 12, face = "bold"),
+        legend.title=element_text(size = 30),
+        legend.text=element_text(size = 30),
+        axis.text.x = element_text(size = 30),
+        axis.text.y = element_text(size = 30),
+        axis.title.x = element_text(size = 22),
+        axis.title.y = element_text(size = 22)) +
+  guides(color = guide_legend(order = 2),
+         shape = guide_legend(order = 1)) +
+  theme(legend.title = element_blank()) +
+  xlab("PC1") +
+  ylab("PC2")
+
+# ======================================
+# Variance explained
+# ======================================
+
+# Variance explained by variancePartition
+
+# Specifying variables to consider
+form <- ~ 
+  Tumor_size_mm + 
+  Overall_survival_month + 
+  (1|ID) + 
+  (1|tumor) + 
+  (1|Gender) + 
+  (1|Virus_infection) +
+  (1|Ta) + 
+  #(1|Edmondson_grade) + 
+  (1|Portal_vein_invasion) + 
+  (1|Hepatic_vein_invasion) + 
+  (1|Bile_duct_invasion) + 
+  (1|Liver_fibrosisc) + 
+  #(1|Alcohol_intake) + 
+  #(1|Smoking) + 
+  (1|Prognosis)
+
+# Running parallel
+cl <- makeCluster(4)
+registerDoParallel(cl)
+
+# Fitting the linear model
+varPart <- fitExtractVarPartModel(voomCounts, form, metadataSubset)
+
+# Sorting variables by median fraction of variance explained
+vp <- sortCols(varPart)
+
+# Violin plot of contribution of each variable to total variance
+plotVarPart(vp)
+
+# Stop parallel
+registerDoSEQ()
+stopCluster(cl)
+
+# ======================================
+# Differential expression analysis with limma
+# ======================================
+
+# Creating a new design model matrix with the variable of interest and the
+# first dimension of the MDS
+design <- model.matrix(~1+v$targets$gender_tissue_viral+v$targets$md1)
+colnames(design) <- gsub("v\\$targets\\$gender_tissue_viral", "", colnames(design))
+colnames(design) <- gsub("v\\$targets\\$md1", "md1", colnames(design))
+head(design)
+
+# Running voom again with the new design matrix.
+v <- voomWithQualityWeights(dge, design, plot=TRUE)
+
+# Block design for individual. This is used in tumor-normal comparisons with
+# paired samples.
+corfit <- duplicateCorrelation(v, design, block = v$targets$ID)
+# This should give a positive correlation value. It represents the
+# correlation between measurements made on the same person.
+corfit$consensus
+
+# Fitting the linear model with limma.
+# If using paired samples, the within-patient correlation and a block design
+# for patient is used to account for pairwise samples
+fit <- lmFit(v, design, block = v$targets$ID, correlation = corfit$consensus)
+
+# Contrast design for differential expression
+# Defining pairwise comparisons
+contrasts <- makeContrasts(HBVAdjacent_M_vs_HBVAdjacent_F = M_0_HBV - F_0_HBV,
+                           HCVAdjacent_M_vs_HCVAdjacent_F = M_0_HCV - F_0_HCV,
+                           NBNCAdjacent_M_vs_NBNCAdjacent_F = M_0_NBNC - F_0_NBNC,
+                           HBVTumor_M_vs_HBVTumor_F = M_1_HBV - F_1_HBV,
+                           HCVTumor_M_vs_HCVTumor_F = M_1_HCV - F_1_HCV,
+                           NBNCTumor_M_vs_NBNCTumor_F = M_1_NBNC - F_1_NBNC,
+                           bothTumor_M_vs_bothAdjacent_M = M_1_both - M_0_both,
+                           HBVTumor_M_vs_HBVAdjacent_M = M_1_HBV - M_0_HBV,
+                           HCVTumor_M_vs_HCVAdjacent_M = M_1_HCV - M_0_HCV,
+                           NBNCTumor_M_vs_NBNCAdjacent_M = M_1_NBNC - M_0_NBNC,
+                           HBVTumor_F_vs_HBVAdjacent_F = F_1_HBV - F_0_HBV,
+                           HCVTumor_F_vs_HCVAdjacent_F = F_1_HCV - F_0_HCV,
+                           NBNCTumor_F_vs_NBNCAdjacent_F = F_1_NBNC - F_0_NBNC,
+                           levels=colnames(design))
+
+head(contrasts)
+
+# Assigning all comparisons to a vector for later
+allComparisons <- colnames(contrasts)
+
+# Running contrast analysis
+vfit <- contrasts.fit(fit, contrasts = contrasts)
+# Looking at N of DEGs with adj. p <0.01 and log2FC>2
+summary(decideTests(vfit, adjust.method = "BH", p.value = 0.01, lfc = 2))
+
+# Computing differential expression based on the empirical Bayes moderation of
+# the standard errors towards a common value. Robust = should the estimation of
+# the empirical Bayes prior parameters be robustified against outlier sample
+# variances?
+veBayesFit <- eBayes(vfit, robust=TRUE)
+plotSA(veBayesFit, main = "Final model: Mean-variance trend")
+
+# Getting the DEGs. Log2FC of 1 is equivalent to linear fold change of 2.
+
+coef = 1
+
+for (i in allComparisons){
+  # Getting summary statistics for all genes
+  vTopTableAll <- topTable(veBayesFit, coef=coef, n=Inf, p.value=1, lfc=0)
+  path <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_", i, "_fdr1_lfc0.txt", sep = "")
+  write.table(vTopTableAll, path, sep = "\t")
+  
+  # Adj.p<0.01, log2FC>0
+  vTopTable1 <- topTable(veBayesFit, coef=coef, n=Inf, p.value=0.01, lfc=0)
+  path <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_", i, "_fdr001_lfc0.txt", sep = "")
+  write.table(vTopTable1, path, sep = "\t")
+  
+  # Adj.p<0.01, log2FC>1
+  vTopTable2 <- topTable(veBayesFit, coef=coef, n=Inf, p.value=0.01, lfc=1)
+  path <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_", i, "_fdr001_lfc1.txt", sep = "")
+  write.table(vTopTable2, path, sep = "\t")
+  
+  # Adj.p<0.01, log2FC>2
+  vTopTable3 <- topTable(veBayesFit, coef=coef, n=Inf, p.value=0.01, lfc=2)
+  path <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_", i, "_fdr001_lfc2.txt", sep = "")
+  write.table(vTopTable3, path, sep = "\t")
+  
+  coef = coef+1
+}
+
+# ======================================
+# GO gene-set enrichment analysis
+# ======================================
+
+# Vector of GO ontologies
+ontologies = c("CC", "MF", "BP")
+
+# Looping through all comparisons, running the GO gene-set enrichment analysis
+for (i in allComparisons){
+  # Reading in DE summary statistics
+  path <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_", i, "_fdr1_lfc0.txt", sep = "")
+  degResult <- read.table(path)
+  
+  # Creating the clusterProfiler input data: log2FC and gene IDs
+  geneList <- degResult[,"logFC"]
+  names(geneList) <- sapply(strsplit(as.character(degResult[,"id"]),"\\."), `[`, 1)
+  
+  # Sorting by log2FC
+  geneList <- sort(geneList, decreasing = TRUE)
+  
+  # Running GO GSEA for each ontology
+  for (ont in ontologies) {
+    # Gene set enrichment analysis based on all ranked genes
+    gseaGO <- gseGO(geneList      = geneList,
+                    OrgDb         = "org.Hs.eg.db",
+                    keyType       = 'ENSEMBL',
+                    ont           = ont,
+                    nPerm         = 1000,
+                    minGSSize     = 100,
+                    maxGSSize     = 500,
+                    pAdjustMethod = "BH",
+                    pvalueCutoff  = 0.05,
+                    verbose       = FALSE)
+    
+    # Writing results to a file
+    resultPath <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_", ont,
+                        "_clusterProfiler_", i,
+                        "_nperm10k_minGSSize100_maxGSSize500_BHp005.txt",
+                        sep = "")
+    write.table(gseaGO, resultPath, sep = "\t")
+  }
+}
+
+# ======================================
+# GO term set similary test
+# ======================================
+
+# Testing for the similarity of the sets of GO terms enriched in each comparison.
+# Using the relative method.
+
+# Annotations for each GO ontology
+hsGO_CC <- godata('org.Hs.eg.db', ont="CC")
+hsGO_MF <- godata('org.Hs.eg.db', ont="MF")
+hsGO_BP <- godata('org.Hs.eg.db', ont="BP")
+
+# Creating a dataframe for the similarity test results
+simResCC <- data.frame(matrix(NA, nrow = length(allComparisons),
+                              ncol = length(allComparisons)))
+colnames(simResCC) <- allComparisons
+rownames(simResCC) <- allComparisons
+simResMF <- data.frame(matrix(NA, nrow = length(allComparisons),
+                              ncol = length(allComparisons)))
+colnames(simResMF) <- allComparisons
+rownames(simResMF) <- allComparisons
+simResBP <- data.frame(matrix(NA, nrow = length(allComparisons),
+                              ncol = length(allComparisons)))
+colnames(simResBP) <- allComparisons
+rownames(simResBP) <- allComparisons
+
+for (i in allComparisons){
+  # Compare to every other comparison
+  compare_to <- setdiff(allComparisons, i)
+  for (c in compare_to){
+    # CC
+    # Reading in GO GSEA results
+    i_path_cc <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_CC_clusterProfiler_",
+                       i, "_nperm10k_minGSSize100_maxGSSize500_BHp005.txt",
+                       sep = "")
+    i_result_cc <- read.table(i_path_cc, header=TRUE)
+    
+    c_path_cc <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_CC_clusterProfiler_",
+                       c, "_nperm10k_minGSSize100_maxGSSize500_BHp005.txt",
+                       sep = "")
+    c_result_cc <- read.table(c_path_cc, header=TRUE)
+    # Vectors of GO terms
+    go_i_cc <- i_result_cc[,"ID"]
+    go_c_cc <- c_result_cc[,"ID"]
+    
+    simResGOCC <- mgoSim(go_i_cc, go_c_cc, semData=hsGO_CC, measure="Rel",
+                         combine="BMA")
+    simResCC[as.character(i), as.character(c)] = simResGOCC
+    
+    # MF
+    # Reading in GO GSEA results
+    i_path_mf <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_MF_clusterProfiler_",
+                       i, "_nperm10k_minGSSize100_maxGSSize500_BHp005.txt",
+                       sep = "")
+    i_result_mf <- read.table(i_path_mf, header=TRUE)
+    
+    c_path_mf <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_MF_clusterProfiler_",
+                       c, "_nperm10k_minGSSize100_maxGSSize500_BHp005.txt",
+                       sep = "")
+    
+    c_result_mf <- read.table(c_path_mf, header=TRUE)
+    # Vectors of GO terms
+    go_i_mf <- i_result_mf[,"ID"]
+    go_c_mf <- c_result_mf[,"ID"]
+    
+    simResGOMF <- mgoSim(go_i_mf, go_c_mf, semData=hsGO_MF, measure="Rel",
+                         combine="BMA")
+    simResMF[as.character(i), as.character(c)] = simResGOMF
+    
+    # BP
+    # Reading in GO GSEA results
+    i_path_bp <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_BP_clusterProfiler_",
+                       i, "_nperm10k_minGSSize100_maxGSSize500_BHp005.txt",
+                       sep = "")
+    i_result_bp <- read.table(i_path_bp, header=TRUE)
+    
+    c_path_bp <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_BP_clusterProfiler_",
+                       c, "_nperm10k_minGSSize100_maxGSSize500_BHp005.txt",
+                       sep = "")
+    c_result_bp <- read.table(c_path_bp, header=TRUE)
+    
+    # Vectors of GO terms
+    go_i_bp <- i_result_bp[,"ID"]
+    go_c_bp <- c_result_bp[,"ID"]
+    
+    simResGOBP <- mgoSim(go_i_bp, go_c_bp, semData=hsGO_BP, measure="Rel",
+                         combine="BMA")
+    simResBP[as.character(i), as.character(c)] = simResGOBP
+  }
+}
+
+# simResCC
+# simResMF
+# simResBP
+
+# Writing similarity test results to files
+simResCC_resultPath <- "/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_mgoSim_CC_clusterProfiler_nperm10k_minGSSize100_maxGSSize500_p005.txt"
+write.table(simResCC, simResCC_resultPath, sep = "\t")
+
+simResMF_resultPath <- "/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_mgoSim_MF_clusterProfiler_nperm10k_minGSSize100_maxGSSize500_p005.txt"
+write.table(simResMF, simResMF_resultPath, sep = "\t")
+
+simResBP_resultPath <- "/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_mgoSim_BP_clusterProfiler_nperm10k_minGSSize100_maxGSSize500_p005.txt"
+write.table(simResBP, simResBP_resultPath, sep = "\t")
+
+# ======================================
+# KEGG gene-set enrichment analysis
+# ======================================
+
+# Converting gene names of all tested genes to NCBI IDs
+path <- "/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_HBVAdjacent_M_vs_HBVAdjacent_F_fdr1_lfc0.txt"
+degResult_genes <- read.table(path)
+degResult_genes$hgnc_symbol <- degResult_genes$name
+ensembl <- useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+biomart <- getBM(attributes=c('ensembl_gene_id', 'hgnc_symbol', 'entrezgene_id', 'kegg_enzyme'), filters = 'hgnc_symbol', values = degResult_genes$hgnc_symbol, mart = ensembl)
+degResult_genes_biomart <- merge(degResult_genes, biomart, by="hgnc_symbol")
+head(degResult_genes_biomart)
+
+# Looping through all comparisons, running the KEGG gene-set enrichment analysis
+for (i in allComparisons){
+  # Reading in DE summary statistics
+  path <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_", i, "_fdr1_lfc0.txt", sep = "")
+  degResult <- read.table(path)
+  degResult$hgnc_symbol <- degResult$name
+  degResult_biomart <- merge(degResult, biomart, by="hgnc_symbol")
+  degResult_biomart <- degResult_biomart[complete.cases(degResult_biomart), ]
+  
+  # Creating the clusterProfiler input data
+  geneList <- degResult_biomart[,"logFC"]
+  names(geneList) <- degResult_biomart[,"entrezgene_id"]
+  
+  # Sorting by log2FC
+  geneList <- sort(geneList, decreasing = TRUE)
+  
+  # Running KEGG GSEA for each ontology
+  # Gene set enrichment analysis based on all ranked genes
+  gseaKEGG <- gseKEGG(geneList      = geneList,
+                      organism      = 'hsa',
+                      keyType       = 'ncbi-geneid',
+                      nPerm         = 10000,
+                      minGSSize     = 100,
+                      maxGSSize     = 500,
+                      pAdjustMethod = "BH",
+                      pvalueCutoff  = 0.05,
+                      verbose       = FALSE)
+  
+  # Writing results to a file
+  resultPath <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/KEGG_GSEA_clusterProfiler_", i, "_nperm10k_minGSSize100_maxGSSize500_BHp005.txt", sep = "")
+  write.table(gseaKEGG, resultPath, sep = "\t")
+  
+  # KEGG module gene-set enrichment analysis
+  gseaMKEGG <- gseMKEGG(geneList      = geneList,
+                        organism      = 'hsa',
+                        keyType       = 'kegg',
+                        nPerm         = 10000,
+                        minGSSize     = 100,
+                        maxGSSize     = 500,
+                        pAdjustMethod = "BH",
+                        pvalueCutoff  = 0.05,
+                        verbose       = FALSE)
+  
+  # Writing results to a file
+  resultPath <- paste("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/MKEGG_GSEA_clusterProfiler_", i, "_nperm10k_minGSSize100_maxGSSize500_BHp005.txt", sep = "")
+  write.table(gseaMKEGG, resultPath, sep = "\t")
+}
+
+# ======================================
+# Visualizing the results
+# ======================================
+
+# UpSet plot of DEGs detected in the tumor vs. tumor adjacent comparisons
+nbnc_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_NBNCTumor_M_vs_NBNCAdjacent_M_fdr001_lfc2.txt"))
+hbv_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_HBVTumor_M_vs_HBVAdjacent_M_fdr001_lfc2.txt"))
+hcv_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_HCVTumor_M_vs_HCVAdjacent_M_fdr001_lfc2.txt"))
+both_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_bothTumor_M_vs_bothAdjacent_M_fdr001_lfc2.txt"))
+
+nbnc_f_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_NBNCTumor_F_vs_NBNCAdjacent_F_fdr001_lfc2.txt"))
+hbv_f_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_HBVTumor_F_vs_HBVAdjacent_F_fdr001_lfc2.txt"))
+hcv_f_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_HCVTumor_F_vs_HCVAdjacent_F_fdr001_lfc2.txt"))
+
+# Creating the input list
+listInput <- list(Neither_M = nbnc_m_tvsa,
+                  HBV_M = hbv_m_tvsa,
+                  HCV_M = hcv_m_tvsa,
+                  Both_M = both_m_tvsa,
+                  Neither_F = nbnc_f_tvsa,
+                  HBV_F = hbv_f_tvsa,
+                  HCV_F = hcv_f_tvsa)
+
+# Plotting
+upset(fromList(listInput), order.by = "freq", nsets = 7, 
+      number.angles = 0, text.scale = c(2, 2, 2, 2, 2, 1.5))
+
+# UpSet plot of enriched pathways detected in the tumor vs. tumor adjacent comparisons
+CC_nbnc_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_CC_clusterProfiler_NBNCTumor_M_vs_NBNCAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+CC_hbv_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_CC_clusterProfiler_HBVTumor_M_vs_HBVAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+CC_hcv_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_CC_clusterProfiler_HCVTumor_M_vs_HCVAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+CC_both_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_CC_clusterProfiler_bothTumor_M_vs_bothAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+
+CC_nbnc_f_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_CC_clusterProfiler_NBNCTumor_F_vs_NBNCAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+CC_hbv_f_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_CC_clusterProfiler_HBVTumor_F_vs_HBVAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+CC_hcv_f_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_CC_clusterProfiler_HCVTumor_F_vs_HCVAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+
+BP_nbnc_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_BP_clusterProfiler_NBNCTumor_M_vs_NBNCAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+BP_hbv_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_BP_clusterProfiler_HBVTumor_M_vs_HBVAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+BP_hcv_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_BP_clusterProfiler_HCVTumor_M_vs_HCVAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+BP_both_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_BP_clusterProfiler_bothTumor_M_vs_bothAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+
+BP_nbnc_f_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_BP_clusterProfiler_NBNCTumor_F_vs_NBNCAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+BP_hbv_f_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_BP_clusterProfiler_HBVTumor_F_vs_HBVAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+BP_hcv_f_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_BP_clusterProfiler_HCVTumor_F_vs_HCVAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+
+MF_nbnc_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_MF_clusterProfiler_NBNCTumor_M_vs_NBNCAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+MF_hbv_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_MF_clusterProfiler_HBVTumor_M_vs_HBVAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+MF_hcv_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_MF_clusterProfiler_HCVTumor_M_vs_HCVAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+MF_both_m_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_MF_clusterProfiler_bothTumor_M_vs_bothAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+
+MF_nbnc_f_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_MF_clusterProfiler_NBNCTumor_F_vs_NBNCAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+MF_hbv_f_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_MF_clusterProfiler_HBVTumor_F_vs_HBVAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+MF_hcv_f_tvsa <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_MF_clusterProfiler_HCVTumor_F_vs_HCVAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt"))
+
+# Creating the input list
+listInput <- list(Neither_M = MF_nbnc_m_tvsa,
+                  HBV_M = MF_hbv_m_tvsa,
+                  HCV_M = MF_hcv_m_tvsa,
+                  Both_M = MF_both_m_tvsa,
+                  Neither_F = MF_nbnc_f_tvsa,
+                  HBV_F = MF_hbv_f_tvsa,
+                  HCV_F = MF_hcv_f_tvsa)
+
+# Plotting
+upset(fromList(listInput), order.by = "freq", nsets = 7, 
+      number.angles = 0, text.scale = c(2, 2, 2, 2, 2, 1.5))
+
+# Which GO BP pathways are unique to female HBV?
+allOthers <- c(BP_nbnc_m_tvsa, BP_hbv_m_tvsa, BP_hcv_m_tvsa, BP_both_m_tvsa, BP_nbnc_f_tvsa, BP_hcv_f_tvsa)
+setdiff(BP_hbv_f_tvsa, allOthers)
+fHBVres <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_BP_clusterProfiler_HBVTumor_F_vs_HBVAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt")
+fHBVunique <- fHBVres[fHBVres$ID %in% setdiff(BP_hbv_f_tvsa, allOthers) ,]
+fHBVunique$Description
+
+# Which GO BP pathways are shared across all comparisons?
+allShared <- Reduce(intersect, list(BP_nbnc_m_tvsa, BP_hbv_m_tvsa, BP_hcv_m_tvsa, BP_both_m_tvsa, BP_nbnc_f_tvsa, BP_hbv_f_tvsa, BP_hcv_f_tvsa))
+sharedRes <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/GO_GSEA_BP_clusterProfiler_HBVTumor_F_vs_HBVAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt")
+sharedRes <- sharedRes[sharedRes$ID %in% allShared ,]
+sharedRes$Description
+
+# Venn diagrams of DEGs detected in the male vs. female comparisons
+tumor_nbnc_mvsf <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_NBNCTumor_M_vs_NBNCTumor_F_fdr001_lfc2.txt"))
+tumor_hbv_mvsf <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_HBVTumor_M_vs_HBVTumor_F_fdr001_lfc2.txt"))
+tumor_hcv_mvsf <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_HCVTumor_M_vs_HCVTumor_F_fdr001_lfc2.txt"))
+
+venn.plot <- venn.diagram(
+  x = list("Neither" = tumor_nbnc_mvsf, "HBV" = tumor_hbv_mvsf, "HCV" = tumor_hcv_mvsf),
+  filename = "MvsF_Salmon_batchMD1_tumor_venn.tiff",
+  scaled = TRUE,
+  col = "transparent",
+  fill = c(neitherColor, hbvColor, hcvColor),
+  main.pos = c(0.5, 0.5, 0.5),
+  cex = 1.5,
+  cat.cex = 1.5,
+  main.cex = 2,
+  cat.default.pos = "outer",
+  cat.pos = c(-15,15,180),
+  cat.dist = c(0.05,0.05,0.05),
+  cat.fontfamily = "sans",
+  main = "",
+  fontfamily = "sans",
+  na = "remove",
+  inverted = FALSE)
+
+venn.plot
+
+adjacent_nbnc_mvsf <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_NBNCAdjacent_M_vs_NBNCAdjacent_F_fdr001_lfc2.txt"))
+adjacent_hbv_mvsf <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_HBVAdjacent_M_vs_HBVAdjacent_F_fdr001_lfc2.txt"))
+adjacent_hcv_mvsf <- rownames(read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_HCVAdjacent_M_vs_HCVAdjacent_F_fdr001_lfc2.txt"))
+
+venn.plot <- venn.diagram(
+  x = list("Neither" = adjacent_nbnc_mvsf, "HBV" = adjacent_hbv_mvsf, "HCV" = adjacent_hcv_mvsf),
+  filename = "MvsF_Salmon_batchMD1_adjacent_venn.tiff",
+  scaled = TRUE,
+  col = "transparent",
+  fill = c(neitherColor, hbvColor, hcvColor),
+  main.pos = c(0.5, 0.5, 0.5),
+  cex = 1.5,
+  cat.cex = 1.5,
+  main.cex = 2,
+  cat.default.pos = "outer",
+  cat.pos = c(-15,15,180),
+  cat.dist = c(0.05,0.05,0.05),
+  cat.fontfamily = "sans",
+  main = "",
+  fontfamily = "sans",
+  na = "remove",
+  inverted = FALSE)
+
+venn.plot
+
+# Volcano plots of sex-biased gene expression in non-infected, HBV, and HCV cases
+
+# Assigning colors to highlight genes that have an absolute fold change => 2
+# and an adjusted p-value =< 0.01
+neitherAllStats <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_NBNCTumor_M_vs_NBNCTumor_F_fdr1_lfc0.txt", header=TRUE, sep="\t", stringsAsFactors=F) 
+hbvAllStats <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_HBVTumor_M_vs_HBVTumor_F_fdr1_lfc0.txt", header=TRUE, sep="\t", stringsAsFactors=F) 
+hcvAllStats <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/DEGs/DEGs_newcounts_Salmon_batchMD1cov_fpkm05_HCVTumor_M_vs_HCVTumor_F_fdr1_lfc0.txt", header=TRUE, sep="\t", stringsAsFactors=F) 
+
+dfNeither <- data.frame(neitherAllStats$adj.P.Val, neitherAllStats$logFC, neitherAllStats$chr, neitherAllStats$id, neitherAllStats$name)
+dfHBV <- data.frame(hbvAllStats$adj.P.Val, hbvAllStats$logFC, hbvAllStats$chr, hbvAllStats$id, hbvAllStats$name)
+dfHCV <- data.frame(hcvAllStats$adj.P.Val, hcvAllStats$logFC, hcvAllStats$chr, hcvAllStats$id, hcvAllStats$name)
+
+colnames(dfNeither) <- c("adj.P.Val", "logFC", "chr", "id", "name")
+colnames(dfHBV) <- c("adj.P.Val", "logFC", "chr", "id", "name")
+colnames(dfHCV) <- c("adj.P.Val", "logFC", "chr", "id", "name")
+
+dfNeitherSig <- dfNeither[(abs(dfNeither$logFC) >= 2 & dfNeither$adj.P.Val <= 0.01),]$id
+dfHBVSig <- dfHBV[(abs(dfHBV$logFC) >= 2 & dfHBV$adj.P.Val <= 0.01),]$id
+dfHCVSig <- dfHCV[(abs(dfHCV$logFC) >= 2 & dfHCV$adj.P.Val <= 0.01),]$id
+
+# For no hepatitis
+# Finding X and Y linked and autosomal genes, assigning color values
+dfNeitherAnons <- subset(dfNeither, chr != "chrX" & chr != "chrY" & !(id %in% dfNeitherSig))
+dfNeitherAnons <- cbind(dfNeitherAnons , rep(1, nrow(dfNeitherAnons)))
+colnames(dfNeitherAnons)[6] <- "Color"
+
+dfNeitherXnons <- subset(dfNeither, chr == "chrX" & !(id %in% dfNeitherSig))
+dfNeitherXnons <- cbind(dfNeitherXnons, rep(2, nrow(dfNeitherXnons)))
+colnames(dfNeitherXnons)[6] <- "Color"
+
+dfNeitherYnons <- subset(dfNeither, chr == "chrY" & !(id %in% dfNeitherSig))
+dfNeitherYnons <- cbind(dfNeitherYnons, rep(3, nrow(dfNeitherYnons)))
+colnames(dfNeitherYnons)[6] <- "Color"
+
+dfNeitherA <- subset(dfNeither, chr != "chrX" & chr != "chrY" & id %in% dfNeitherSig)
+dfNeitherA <- cbind(dfNeitherA, rep(4, nrow(dfNeitherA)))
+colnames(dfNeitherA)[6] <- "Color"
+
+dfNeitherX <- subset(dfNeither, chr == "chrX" & id %in% dfNeitherSig)
+dfNeitherX <- cbind(dfNeitherX, rep(5, nrow(dfNeitherX)))
+colnames(dfNeitherX)[6] <- "Color"
+
+dfNeitherY <- subset(dfNeither, chr == "chrY" & id %in% dfNeitherSig)
+dfNeitherY <- cbind(dfNeitherY, rep(6, nrow(dfNeitherY)))
+colnames(dfNeitherY)[6] <- "Color"
+
+dfNeitherPlot <- rbind(dfNeitherAnons, dfNeitherXnons, dfNeitherYnons, dfNeitherA, dfNeitherX, dfNeitherY)
+dfNeitherPlot$Color <- as.factor(dfNeitherPlot$Color)
+
+# Constructing the plot object. The colors will not work the way they should if
+# one of the groups doesn't have any genes
+# "azure3", "pink", "seagreen2", "black", "mediumvioletred", "springgreen"
+p <- ggplot(data = dfNeitherPlot, aes(x = logFC, y = -log10(adj.P.Val), color=Color )) +
+  geom_point(alpha = 0.5, size = 8) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  xlim(c(-15, 15)) + ylim(c(0, 40)) +
+  scale_color_manual(values = c("azure3", "pink", "seagreen2", "black", "mediumvioletred", "springgreen")) +
+  labs(x=expression(log[2](FC)),
+       y=expression(-log[10] ~ "(FDR-adjusted " ~ italic("p") ~ "-value)")) +
+  theme(axis.title.x=element_text(size=40), 
+        axis.text.x=element_text(size=30)) +
+  theme(axis.title.y=element_text(size=40),
+        axis.text.y=element_text(size=30))
+p
+
+forLabel <- subset(dfNeitherPlot, adj.P.Val<=0.01 & abs(logFC)>=2)
+
+# Adding lines for significance thresholds
+p + geom_hline(yintercept = 2, colour="#000000", linetype="dashed"
+               ) + geom_vline(xintercept = 2, colour="#000000", linetype="dashed"
+                              ) + geom_vline(xintercept = -2, colour="#000000", linetype="dashed"
+                                             ) + geom_text_repel(data=forLabel, max.iter=1000, box.padding = 0.25, force=1, aes(x = logFC, y = -log10(adj.P.Val), label=name, color=Color), size=8)
+
+
+# For HBV
+# Finding X and Y linked and autosomal genes, assigning color values
+dfHBVAnons <- subset(dfHBV, chr != "chrX" & chr != "chrY" & !(id %in% dfHBVSig))
+dfHBVAnons <- cbind(dfHBVAnons , rep(1, nrow(dfHBVAnons)))
+colnames(dfHBVAnons)[6] <- "Color"
+
+dfHBVXnons <- subset(dfHBV, chr == "chrX" & !(id %in% dfHBVSig))
+dfHBVXnons <- cbind(dfHBVXnons, rep(2, nrow(dfHBVXnons)))
+colnames(dfHBVXnons)[6] <- "Color"
+
+dfHBVYnons <- subset(dfHBV, chr == "chrY" & !(id %in% dfHBVSig))
+dfHBVYnons <- cbind(dfHBVYnons, rep(3, nrow(dfHBVYnons)))
+colnames(dfHBVYnons)[6] <- "Color"
+
+dfHBVA <- subset(dfHBV, chr != "chrX" & chr != "chrY" & id %in% dfHBVSig)
+dfHBVA <- cbind(dfHBVA, rep(4, nrow(dfHBVA)))
+colnames(dfHBVA)[6] <- "Color"
+
+dfHBVX <- subset(dfHBV, chr == "chrX" & id %in% dfHBVSig)
+dfHBVX <- cbind(dfHBVX, rep(5, nrow(dfHBVX)))
+colnames(dfHBVX)[6] <- "Color"
+
+dfHBVY <- subset(dfHBV, chr == "chrY" & id %in% dfHBVSig)
+dfHBVY <- cbind(dfHBVY, rep(6, nrow(dfHBVY)))
+colnames(dfHBVY)[6] <- "Color"
+
+dfHBVPlot <- rbind(dfHBVAnons, dfHBVXnons, dfHBVYnons, dfHBVA, dfHBVX, dfHBVY)
+dfHBVPlot$Color <- as.factor(dfHBVPlot$Color)
+
+# Constructing the plot object. The colors will not work the way they should if
+# one of the groups doesn't have any genes
+p <- ggplot(data = dfHBVPlot, aes(x = logFC, y = -log10(adj.P.Val), color=Color )) +
+     geom_point(alpha = 0.5, size = 8) +
+     theme_bw() +
+     theme(legend.position = "none") +
+     xlim(c(-15, 15)) + ylim(c(0, 60)) +
+     scale_color_manual(values = c("azure3", "pink", "black", "mediumvioletred", "springgreen")) +
+     labs(x=expression(log[2](FC)),
+          y=expression(-log[10] ~ "(FDR-adjusted " ~ italic("p") ~ "-value)")) +
+     theme(axis.title.x=element_text(size=40), 
+           axis.text.x=element_text(size=30)) +
+     theme(axis.title.y=element_text(size=40),
+           axis.text.y=element_text(size=30))
+p
+
+forLabel <- subset(dfHBVPlot, adj.P.Val<=0.01 & abs(logFC)>=2)
+
+# Adding lines for significance thresholds
+p + geom_hline(yintercept = 2, colour="#000000", linetype="dashed"
+               ) + geom_vline(xintercept = 2, colour="#000000", linetype="dashed"
+                              ) + geom_vline(xintercept = -2, colour="#000000", linetype="dashed"
+                                             ) + geom_text_repel(data=forLabel, max.iter=1000, box.padding = 0.25, force=1, aes(x = logFC, y = -log10(adj.P.Val), label=name, color=Color), size=8)
+
+# For HCV
+# Finding X and Y linked and autosomal genes, assigning color values
+dfHCVAnons <- subset(dfHCV, chr != "chrX" & chr != "chrY" & !(id %in% dfHCVSig))
+dfHCVAnons <- cbind(dfHCVAnons , rep(1, nrow(dfHCVAnons)))
+colnames(dfHCVAnons)[6] <- "Color"
+
+dfHCVXnons <- subset(dfHCV, chr == "chrX" & !(id %in% dfHCVSig))
+dfHCVXnons <- cbind(dfHCVXnons, rep(2, nrow(dfHCVXnons)))
+colnames(dfHCVXnons)[6] <- "Color"
+
+dfHCVYnons <- subset(dfHCV, chr == "chrY" & !(id %in% dfHCVSig))
+dfHCVYnons <- cbind(dfHCVYnons, rep(3, nrow(dfHCVYnons)))
+colnames(dfHCVYnons)[6] <- "Color"
+
+dfHCVA <- subset(dfHCV, chr != "chrX" & chr != "chrY" & id %in% dfHCVSig)
+dfHCVA <- cbind(dfHCVA, rep(4, nrow(dfHCVA)))
+colnames(dfHCVA)[6] <- "Color"
+
+dfHCVX <- subset(dfHCV, chr == "chrX" & id %in% dfHCVSig)
+dfHCVX <- cbind(dfHCVX, rep(5, nrow(dfHCVX)))
+colnames(dfHCVX)[6] <- "Color"
+
+dfHCVY <- subset(dfHCV, chr == "chrY" & id %in% dfHCVSig)
+dfHCVY <- cbind(dfHCVY, rep(6, nrow(dfHCVY)))
+colnames(dfHCVY)[6] <- "Color"
+
+dfHCVPlot <- rbind(dfHCVAnons, dfHCVXnons, dfHCVYnons, dfHCVA, dfHCVX, dfHCVY)
+dfHCVPlot$Color <- as.factor(dfHCVPlot$Color)
+
+# Constructing the plot object. The colors will not work the way they should if
+# one of the groups doesn't have any genes
+p <- ggplot(data = dfHCVPlot, aes(x = logFC, y = -log10(adj.P.Val), color=Color )) +
+  geom_point(alpha = 0.5, size = 8) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  xlim(c(-15, 15)) + ylim(c(0, 125)) +
+  scale_color_manual(values = c("azure3", "pink", "seagreen2", "black", "mediumvioletred", "springgreen")) +
+  labs(x=expression(log[2](FC)),
+       y=expression(-log[10] ~ "(FDR-adjusted " ~ italic("p") ~ "-value)")) +
+  theme(axis.title.x=element_text(size=40), 
+        axis.text.x=element_text(size=30)) +
+  theme(axis.title.y=element_text(size=40),
+        axis.text.y=element_text(size=30))
+p
+
+forLabel <- subset(dfHCVPlot, adj.P.Val<=0.01 & abs(logFC)>=2)
+
+# Adding lines for significance thresholds
+p + geom_hline(yintercept = 2, colour="#000000", linetype="dashed"
+               ) + geom_vline(xintercept = 2, colour="#000000", linetype="dashed"
+                              ) + geom_vline(xintercept = -2, colour="#000000", linetype="dashed"
+                                             ) + geom_text_repel(data=forLabel, max.iter=1000, box.padding = 0.25, force=1, aes(x = logFC, y = -log10(adj.P.Val), label=name, color=Color), size=8)
+
+# Plotting some of the genes that were DE between NBNC tumor male and female
+# to detect any outlier samples
+
+testGenes <- c("ENSG00000229807.10", "ENSG00000231341.1", "ENSG00000106927.11", "ENSG00000138207.13", "ENSG00000110245.11", "ENSG00000134962.6", "ENSG00000110887.7")
+
+# Subsetting genes
+fpkmSubset <- data.frame(t(fpkm[rownames(fpkm) %in% testGenes , ]))
+fpkmSubset$sampleid <- rownames(fpkmSubset)
+# Adding metadata
+fpkmSubsetMetadata <- merge(fpkmSubset, metadataSubset, by="sampleid")
+# Subsetting NBNC tumor samples
+fpkmSubsetMetadata <- fpkmSubsetMetadata[fpkmSubsetMetadata$Virus_infection == "NBNC" ,]
+fpkmSubsetMetadata <- fpkmSubsetMetadata[fpkmSubsetMetadata$tumor == 1 ,]
+
+p <- ggplot(data = fpkmSubsetMetadata, aes(x = gender_tissue, y = ENSG00000229807.10, fill = gender_tissue)) +
+        scale_fill_manual(values=c("red", "blue")) +
+        geom_point( shape = 21, size=2, position = position_jitterdodge(), color="black", alpha=1) +
+        theme_bw() +
+        theme(plot.title = element_text(size = 12, face = "bold"),
+              legend.title=element_text(size=30),
+              legend.text=element_text(size=30),
+              axis.text.x = element_text(size = 30),
+              axis.text.y = element_text(size = 30),
+              axis.title.x = element_text(size = 30),
+              axis.title.y = element_text(size = 30)) +
+        theme(legend.position="none")
+
+p
+
+#  Dotplots on GSEA results
+library(dplyr)
+library(stringr)
+library(forcats)
+
+keggHBVf <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/KEGG_GSEA_BP_clusterProfiler_HBVTumor_F_vs_HBVAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt")
+keggHCVf <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/KEGG_GSEA_BP_clusterProfiler_HCVTumor_F_vs_HCVAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt")
+keggNBNCf <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/KEGG_GSEA_BP_clusterProfiler_NBNCTumor_F_vs_NBNCAdjacent_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt")
+keggHBVm <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/KEGG_GSEA_BP_clusterProfiler_HBVTumor_M_vs_HBVAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt")
+keggHCVm <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/KEGG_GSEA_BP_clusterProfiler_HCVTumor_M_vs_HCVAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt")
+keggNBNCm <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/KEGG_GSEA_BP_clusterProfiler_NBNCTumor_M_vs_NBNCAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt")
+keggbothm <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/KEGG_GSEA_BP_clusterProfiler_bothTumor_M_vs_bothAdjacent_M_nperm10k_minGSSize100_maxGSSize500_BHp005.txt")
+
+keggMvsFHBVtumor <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/KEGG_GSEA_BP_clusterProfiler_HBVTumor_M_vs_HBVTumor_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt")
+keggMvsFCBVtumor <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/KEGG_GSEA_BP_clusterProfiler_HCVTumor_M_vs_HCVTumor_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt")
+keggMvsFNBNCtumor <- read.table("/Users/hnatri/Dropbox (ASU)/ICGC_HCC/GO_KEGG/KEGG_GSEA_BP_clusterProfiler_NBNCTumor_M_vs_NBNCTumor_F_nperm10k_minGSSize100_maxGSSize500_BHp005.txt")
+
+# Count the gene number
+gene_count <- keggMvsFHBVtumor %>% group_by(ID) %>% summarise(count = sum(str_count(core_enrichment, "/")) + 1)
+
+# Merge with the original dataframe
+dot_df<- left_join(keggMvsFHBVtumor, gene_count, by = "ID") %>% mutate(GeneRatio = count/setSize)
+
+ggplot(dot_df, aes(x = GeneRatio, y = fct_reorder(Description, GeneRatio))) + 
+  geom_point(aes(size = GeneRatio, color = p.adjust)) +
+  theme_bw(base_size = 14) +
+  scale_colour_gradient(limits=c(0, 0.10), low="red") +
+  ylab(NULL) +
+  ggtitle("KEGG pathway enrichment")
+
+# Faceted for downregulated and upregulated
+dot_df$type = "upregulated"
+dot_df$type[dot_df$NES < 0] = "downregulated"
+
+p <- ggplot(dot_df, aes(x = GeneRatio, y = fct_reorder(Description, GeneRatio))) + 
+  geom_point(aes(size = GeneRatio, color = p.adjust)) +
+  theme_bw(base_size = 14) +
+  scale_colour_gradient(limits=c(0, 0.10), low="red") +
+  ylab(NULL) +
+  ggtitle("KEGG pathway enrichment")
+
+p + facet_grid(.~type)

@@ -764,10 +764,10 @@ p <- ggplot(data = dfNeitherPlot, aes(x = logFC, y = -log10(adj.P.Val), color=Co
   scale_color_manual(values = c("azure3", "pink", "seagreen2", "black", "mediumvioletred", "springgreen")) +
   labs(x=expression(log[2](FC)),
        y=expression(-log[10] ~ "(FDR-adjusted " ~ italic("p") ~ "-value)")) +
-  theme(axis.title.x=element_text(size=40), 
-        axis.text.x=element_text(size=30)) +
-  theme(axis.title.y=element_text(size=40),
-        axis.text.y=element_text(size=30))
+  theme(axis.title.x=element_text(size=12), 
+        axis.text.x=element_text(size=10)) +
+  theme(axis.title.y=element_text(size=12),
+        axis.text.y=element_text(size=10))
 p
 
 forLabel <- subset(dfNeitherPlot, adj.P.Val<=0.01 & abs(logFC)>=2)
@@ -818,10 +818,10 @@ p <- ggplot(data = dfHBVPlot, aes(x = logFC, y = -log10(adj.P.Val), color=Color 
      scale_color_manual(values = c("azure3", "pink", "black", "mediumvioletred", "springgreen")) +
      labs(x=expression(log[2](FC)),
           y=expression(-log[10] ~ "(FDR-adjusted " ~ italic("p") ~ "-value)")) +
-     theme(axis.title.x=element_text(size=40), 
-           axis.text.x=element_text(size=30)) +
-     theme(axis.title.y=element_text(size=40),
-           axis.text.y=element_text(size=30))
+     theme(axis.title.x=element_text(size=12), 
+           axis.text.x=element_text(size=10)) +
+     theme(axis.title.y=element_text(size=12),
+           axis.text.y=element_text(size=10))
 p
 
 forLabel <- subset(dfHBVPlot, adj.P.Val<=0.01 & abs(logFC)>=2)
@@ -871,10 +871,10 @@ p <- ggplot(data = dfHCVPlot, aes(x = logFC, y = -log10(adj.P.Val), color=Color 
   scale_color_manual(values = c("azure3", "pink", "seagreen2", "black", "mediumvioletred", "springgreen")) +
   labs(x=expression(log[2](FC)),
        y=expression(-log[10] ~ "(FDR-adjusted " ~ italic("p") ~ "-value)")) +
-  theme(axis.title.x=element_text(size=40), 
-        axis.text.x=element_text(size=30)) +
-  theme(axis.title.y=element_text(size=40),
-        axis.text.y=element_text(size=30))
+  theme(axis.title.x=element_text(size=12), 
+        axis.text.x=element_text(size=10)) +
+  theme(axis.title.y=element_text(size=12),
+        axis.text.y=element_text(size=10))
 p
 
 forLabel <- subset(dfHCVPlot, adj.P.Val<=0.01 & abs(logFC)>=2)
@@ -904,12 +904,12 @@ p <- ggplot(data = fpkmSubsetMetadata, aes(x = gender_tissue, y = ENSG0000022980
         geom_point( shape = 21, size=2, position = position_jitterdodge(), color="black", alpha=1) +
         theme_bw() +
         theme(plot.title = element_text(size = 12, face = "bold"),
-              legend.title=element_text(size=30),
-              legend.text=element_text(size=30),
-              axis.text.x = element_text(size = 30),
-              axis.text.y = element_text(size = 30),
-              axis.title.x = element_text(size = 30),
-              axis.title.y = element_text(size = 30)) +
+              legend.title=element_text(size=10),
+              legend.text=element_text(size=10),
+              axis.text.x = element_text(size = 10),
+              axis.text.y = element_text(size = 10),
+              axis.title.x = element_text(size = 10),
+              axis.title.y = element_text(size = 10)) +
         theme(legend.position="none")
 
 p
